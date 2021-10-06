@@ -3,13 +3,15 @@
 #include <rte_mbuf.h>
 #include <arpa/inet.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #define EEXIT(...) rte_exit(EXIT_FAILURE, ##__VA_ARGS__)
 
 #define MBUF_POOL_SIZE (4096 - 1)
 #define ETH_DEV_PORT_ID 0
 #define BURST_SIZE 32
+
+#define MAKE_IPV4_ADDR(a, b, c, d) (a + (b << 8) + (c << 16) + (d << 24))
+#define THIS_IPV4_ADDR MAKE_IPV4_ADDR(192, 168, 1, 26)
 
 static void init_port(struct rte_mempool *mpool)
 {
@@ -46,27 +48,27 @@ static inline void swap_mac(struct rte_ether_hdr *ethdr)
 {
     uint8_t tmp_mac[RTE_ETHER_ADDR_LEN];
 
-    memcpy(tmp_mac, &ethdr->d_addr, RTE_ETHER_ADDR_LEN);
-    memcpy(&ethdr->d_addr, &ethdr->s_addr, RTE_ETHER_ADDR_LEN);
-    memcpy(&ethdr->s_addr, tmp_mac, RTE_ETHER_ADDR_LEN);
+    rte_memcpy(tmp_mac, &ethdr->d_addr, RTE_ETHER_ADDR_LEN);
+    rte_memcpy(&ethdr->d_addr, &ethdr->s_addr, RTE_ETHER_ADDR_LEN);
+    rte_memcpy(&ethdr->s_addr, tmp_mac, RTE_ETHER_ADDR_LEN);
 }
 
 static inline void swap_ip(struct rte_ipv4_hdr *iphdr)
 {
     uint32_t tmp_ip;
 
-    memcpy(&tmp_ip, &iphdr->src_addr, sizeof(tmp_ip));
-    memcpy(&iphdr->src_addr, &iphdr->dst_addr, sizeof(tmp_ip));
-    memcpy(&iphdr->dst_addr, &tmp_ip, sizeof(tmp_ip));
+    rte_memcpy(&tmp_ip, &iphdr->src_addr, sizeof(tmp_ip));
+    rte_memcpy(&iphdr->src_addr, &iphdr->dst_addr, sizeof(tmp_ip));
+    rte_memcpy(&iphdr->dst_addr, &tmp_ip, sizeof(tmp_ip));
 }
 
 static inline void swap_port(struct rte_udp_hdr *udphdr)
 {
     uint16_t tmp_port;
 
-    memcpy(&tmp_port, &udphdr->src_port, sizeof(tmp_port));
-    memcpy(&udphdr->src_port, &udphdr->dst_port, sizeof(tmp_port));
-    memcpy(&udphdr->dst_port, &tmp_port, sizeof(tmp_port));
+    rte_memcpy(&tmp_port, &udphdr->src_port, sizeof(tmp_port));
+    rte_memcpy(&udphdr->src_port, &udphdr->dst_port, sizeof(tmp_port));
+    rte_memcpy(&udphdr->dst_port, &tmp_port, sizeof(tmp_port));
 }
 
 int main(int argc, char *argv[])
@@ -86,6 +88,10 @@ int main(int argc, char *argv[])
     // initialize port
     init_port(mpool);
 
+    // get mac address
+    uint8_t this_mac_addr[RTE_ETHER_ADDR_LEN] = { 0 };
+    rte_eth_macaddr_get(ETH_DEV_PORT_ID, (struct rte_ether_addr *)this_mac_addr);
+
     for (;;) {
         struct rte_mbuf *mbufs[BURST_SIZE];
         // receive
@@ -95,38 +101,70 @@ int main(int argc, char *argv[])
 
         for (unsigned int i = 0; i < nr_recvd; i++) {
             // parse ether header
-            struct rte_ether_hdr *ethdr = rte_pktmbuf_mtod(mbufs[i], struct rte_ehter_hdr *);
-            if (ethdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
-                continue;
+            struct rte_ether_hdr *ethdr = (void *)rte_pktmbuf_mtod(mbufs[i], struct rte_ehter_hdr *);
+            switch (rte_be_to_cpu_16(ethdr->ether_type)) {
+                case RTE_ETHER_TYPE_ARP: {
+                    // parse arp header
+                    struct rte_arp_hdr *arphdr = rte_pktmbuf_mtod_offset(mbufs[i], struct rte_arp_hdr *, sizeof(*ethdr));
+                    if (arphdr->arp_data.arp_tip == THIS_IPV4_ADDR) {
+                        // set arp type is reply
+                        arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
 
-            struct rte_ipv4_hdr *iphdr = rte_pktmbuf_mtod_offset(mbufs[i], struct rte_ipv4_hdr *, sizeof(*ethdr));
+                        // modify ether mac address
+                        rte_memcpy(ethdr->d_addr.addr_bytes, ethdr->s_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+                        rte_memcpy(ethdr->s_addr.addr_bytes, this_mac_addr, RTE_ETHER_ADDR_LEN);
 
-            // parse ipv4 header
-            if (iphdr->next_proto_id == IPPROTO_UDP) {
-                // parse udp header
-                struct rte_udp_hdr *udphdr = (void *)((char *)iphdr + sizeof(*iphdr));
-                *((char *)udphdr + udphdr->dgram_len) = 0;
+                        // modify arp mac address
+                        rte_memcpy(arphdr->arp_data.arp_tha.addr_bytes, arphdr->arp_data.arp_sha.addr_bytes, RTE_ETHER_ADDR_LEN);
+                        rte_memcpy(arphdr->arp_data.arp_sha.addr_bytes, this_mac_addr, RTE_ETHER_ADDR_LEN);
 
-                struct in_addr saddr = { .s_addr = iphdr->src_addr };
-                struct in_addr daddr = { .s_addr = iphdr->dst_addr };
+                        // modify arp ip address
+                        arphdr->arp_data.arp_tip = arphdr->arp_data.arp_sip;
+                        arphdr->arp_data.arp_sip = THIS_IPV4_ADDR;
+                    } else {
+                        goto mbuf_free;
+                    }
 
-                printf("src: %s:%d\n", inet_ntoa(saddr), ntohs(udphdr->src_port));
-                printf("dst: %s:%d\n", inet_ntoa(daddr), ntohs(udphdr->dst_port));
-                printf("udp msg: %s\n", (char *)(udphdr + 1));
+                    break;
+                }
 
-                // swap source and destination value, in order to echo
-                swap_mac(ethdr);
-                swap_ip(iphdr);
-                swap_port(udphdr);
+                case RTE_ETHER_TYPE_IPV4: {
+                    // parse ipv4 header
+                    struct rte_ipv4_hdr *iphdr = rte_pktmbuf_mtod_offset(mbufs[i], struct rte_ipv4_hdr *, sizeof(*ethdr));
+                    if (iphdr->next_proto_id == IPPROTO_UDP) {
+                        // parse udp header
+                        struct rte_udp_hdr *udphdr = (void *)((char *)iphdr + sizeof(*iphdr));
+                        *((char *)udphdr + udphdr->dgram_len) = 0;
+
+                        struct in_addr saddr = { .s_addr = iphdr->src_addr };
+                        struct in_addr daddr = { .s_addr = iphdr->dst_addr };
+
+                        printf("src: %s:%d\n", inet_ntoa(saddr), ntohs(udphdr->src_port));
+                        printf("dst: %s:%d\n", inet_ntoa(daddr), ntohs(udphdr->dst_port));
+                        printf("udp msg: %s\n", (char *)(udphdr + 1));
+
+                        // swap source and destination value, in order to echo
+                        swap_mac(ethdr);
+                        swap_ip(iphdr);
+                        swap_port(udphdr);
+                    } else {
+                        goto mbuf_free;
+                    }
+
+                    break;
+                }
+
+                default:
+                    goto mbuf_free;
             }
-        }
 
-        // send
-        for (int nr_send_left = nr_recvd, nr_send = 0; nr_send_left > 0; nr_send_left -= nr_send)
-            nr_send = rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, mbufs, nr_send_left);
+            // send
+            rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, &mbufs[i], 1);
 
-        for (unsigned int i = 0; i < nr_recvd; i++)
+mbuf_free:
             rte_pktmbuf_free(mbufs[i]);
+            mbufs[i] = NULL;
+        }
     }
 
     return 0;
