@@ -14,7 +14,9 @@
 #define MAKE_IPV4_ADDR(a, b, c, d) (a + (b << 8) + (c << 16) + (d << 24))
 #define THIS_IPV4_ADDR MAKE_IPV4_ADDR(192, 168, 1, 26)
 
-#define TIMER_RESOLUTION_CYCLES (2000000000ULL * 10) /* around 1min at 2 Ghz */
+#define TIMER_RESOLUTION_CYCLES (2000000000ULL * 1) /* around 10s at 2 Ghz */
+
+#define RING_SIZE 1024
 
 static uint8_t g_arp_request_mac[RTE_ETHER_ADDR_LEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 static uint8_t g_this_mac_addr[RTE_ETHER_ADDR_LEN] = { 0 };
@@ -176,9 +178,8 @@ send_arp(struct rte_mempool *mpool,
     uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
     create_arp_packet(pkt_data, src_mac, dst_mac, src_ip, dst_ip, arp_opcode);
 
-
-    rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, &mbuf, 1);
-    rte_pktmbuf_free(mbuf);
+    io_ring_t *io_ring = get_io_ring_instance();
+    en_ring_burst(io_ring->out, &mbuf, 1);
 }
 
 static void
@@ -196,59 +197,26 @@ arp_request_timer_cb(__attribute__((unused)) struct rte_timer *tim, __attribute_
     }
 }
 
-static inline void init_timer(struct rte_mempool *mpool)
+static inline void init_arp_request_timer(struct rte_mempool *mpool, struct rte_timer *timer, unsigned lcore_id)
 {
 	// initialize RTE timer library
 	rte_timer_subsystem_init();
 
 	// initialize timer structures
-    struct rte_timer arp_request_timer;
-	rte_timer_init(&arp_request_timer);
+	rte_timer_init(timer);
 
-	// load timer, every second, on master lcore, reloaded automatically
+	// load timer, every second, on lcore specified lcore_id, reloaded automatically
 	uint64_t hz = rte_get_timer_hz();
-	unsigned lcore_id = rte_lcore_id();
-	rte_timer_reset(&arp_request_timer, hz, PERIODICAL, lcore_id, arp_request_timer_cb, mpool);
+	rte_timer_reset(timer, hz, PERIODICAL, lcore_id, arp_request_timer_cb, mpool);
 }
 
-int main(int argc, char *argv[])
+static int lcore_process_pkt(__attribute__((unused)) void *arg)
 {
-    // initialize Environment Abstraction Layer (EAL)
-    if (rte_eal_init(argc, argv) < 0) {
-        EEXIT("failed to init EAL");
-        rte_exit(EXIT_FAILURE, "failed to init EAL");
-    }
-
-    // initialize memory pool
-    struct rte_mempool *mpool =
-        rte_pktmbuf_pool_create("mbuf pool", MBUF_POOL_SIZE, 0, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
-    if (!mpool)
-        EEXIT("failed to create memory pool");
-
-    // initialize port
-    init_port(mpool);
-
-    // get mac address
-    rte_eth_macaddr_get(ETH_DEV_PORT_ID, (struct rte_ether_addr *)g_this_mac_addr);
-
-    // initalize timer
-   init_timer(mpool);
-
-    uint64_t prev_tsc = 0;
+    io_ring_t *io_ring = get_io_ring_instance();
 
     for (;;) {
-        uint64_t cur_tsc = rte_rdtsc();
-		uint64_t diff_tsc = cur_tsc - prev_tsc;
-		if (diff_tsc > TIMER_RESOLUTION_CYCLES) {
-			rte_timer_manage();
-			prev_tsc = cur_tsc;
-		}
-
         struct rte_mbuf *mbufs[BURST_SIZE];
-        // receive
-        unsigned int nr_recvd = rte_eth_rx_burst(ETH_DEV_PORT_ID, 0, mbufs, BURST_SIZE);
-        if (nr_recvd > BURST_SIZE)
-            EEXIT("too many packets, %d", nr_recvd);
+        unsigned int nr_recvd = de_ring_burst(io_ring->in, mbufs, BURST_SIZE);
 
         for (unsigned int i = 0; i < nr_recvd; i++) {
             // parse ether header
@@ -264,7 +232,6 @@ int main(int argc, char *argv[])
                         break;
                     case RTE_ARP_OP_REPLY:
                         process_arp_reply(arphdr);
-                        goto mbuf_free;
                     default:
                         goto mbuf_free;
                     }
@@ -316,12 +283,77 @@ int main(int argc, char *argv[])
                 goto mbuf_free;
             }
 
-            // send
-            rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, &mbufs[i], 1);
+            en_ring_burst(io_ring->out, &mbufs[i], 1);
+            continue;
 
-mbuf_free:
+    mbuf_free:
             rte_pktmbuf_free(mbufs[i]);
-            mbufs[i] = NULL;
+        }
+
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    // initialize Environment Abstraction Layer (EAL)
+    if (rte_eal_init(argc, argv) < 0) {
+        EEXIT("failed to init EAL");
+        rte_exit(EXIT_FAILURE, "failed to init EAL");
+    }
+
+    // initialize memory pool
+    struct rte_mempool *mpool =
+        rte_pktmbuf_pool_create("mbuf pool", MBUF_POOL_SIZE, 0, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+    if (!mpool)
+        EEXIT("failed to create memory pool");
+
+    // initialize port
+    init_port(mpool);
+
+    // get mac address
+    rte_eth_macaddr_get(ETH_DEV_PORT_ID, (struct rte_ether_addr *)g_this_mac_addr);
+
+    // initialize io ring buffer
+    io_ring_t *io_ring = get_io_ring_instance();
+    init_io_ring(io_ring, RING_SIZE);
+
+    // call lcore_proccess_kt on slave lcore
+    unsigned int lcore_id = rte_lcore_id();
+    rte_eal_remote_launch(lcore_process_pkt, NULL, rte_get_next_lcore(lcore_id, 1, 0));
+
+    // initalize timer
+    struct rte_timer arp_request_timer;
+    init_arp_request_timer(mpool, &arp_request_timer, lcore_id);
+
+    uint64_t prev_tsc = 0;
+
+    for (;;) {
+        // check timer
+        uint64_t cur_tsc = rte_rdtsc();
+		uint64_t diff_tsc = cur_tsc - prev_tsc;
+		if (diff_tsc > TIMER_RESOLUTION_CYCLES) {
+			rte_timer_manage();    // call timer cb
+			prev_tsc = cur_tsc;
+		}
+
+        struct rte_mbuf *mbufs[BURST_SIZE];
+        // receive
+        unsigned int nr_recvd = rte_eth_rx_burst(ETH_DEV_PORT_ID, 0, mbufs, BURST_SIZE);
+        if (nr_recvd > BURST_SIZE)
+            EEXIT("too many packets, %d", nr_recvd);
+
+        if (nr_recvd > 0) {
+            en_ring_burst(io_ring->in, mbufs, nr_recvd);
+        }
+
+        // send
+        unsigned int nr_send = de_ring_burst(io_ring->out, mbufs, BURST_SIZE);
+        if (nr_send > 0) {
+            rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, mbufs, nr_send);
+
+            for (unsigned int i = 0; i < nr_send; i++)
+                rte_pktmbuf_free(mbufs[i]);
         }
     }
 

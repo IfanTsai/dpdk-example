@@ -6,8 +6,7 @@
 #include <rte_malloc.h>
 #include <arpa/inet.h>
 #include <stdint.h>
-
-#define EEXIT(...) rte_exit(EXIT_FAILURE, ##__VA_ARGS__)
+#include "ring_buf.h"
 
 #define ARP_ENTRY_TYPE_DYNAMIC    0
 #define ARP_ENTRY_TYPE_STATIC     1
