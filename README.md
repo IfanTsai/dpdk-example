@@ -6,3 +6,4 @@ dpdk learning code, these examples are based on dpdk 19.08.2
 - icmp
 - dns_server
 - udp: a simple udp user protocol stack implemention, the APIs like posix API
+- tcp: a simple tcp user protocol stack implemention, the APIs like posix API

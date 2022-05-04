@@ -21,11 +21,9 @@ static io_ring_t *io_ring = NULL;
 static inline io_ring_t *get_io_ring_instance(void)
 {
     if (!io_ring) {
-        io_ring = rte_malloc("io ring", sizeof(io_ring_t), 0);
+        io_ring = rte_zmalloc("io ring", sizeof(io_ring_t), 0);
         if (!io_ring)
             EEXIT("failed to malloc io ring buffer");
-
-        memset(io_ring, 0, sizeof(io_ring_t));
     }
 
     return io_ring;
@@ -39,7 +37,6 @@ static inline void init_io_ring(io_ring_t *io_ring, int ring_size)
     if (!io_ring->in)
         io_ring->in = rte_ring_create("in ring", ring_size, rte_socket_id(),
                 RING_F_SP_ENQ | RING_F_SC_DEQ);
-
 
     if (!io_ring->out)
         io_ring->out = rte_ring_create("out ring", ring_size, rte_socket_id(),

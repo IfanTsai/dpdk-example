@@ -41,6 +41,8 @@ static int process_udp_pkt(struct rte_mbuf *mbuf)
     pthread_cond_signal(&sock->cond);
     pthread_mutex_unlock(&sock->mutex);
 
+    rte_pktmbuf_free(mbuf);
+
     return 0;
 }
 
@@ -77,7 +79,7 @@ create_udp_packet(uint8_t *pkt_data, uint16_t len,
 }
 
 
-static void send_udp(struct rte_mempool *mpool)
+static void send_udp_pkts(struct rte_mempool *mpool)
 {
     for (sock_t *sock = lsock; sock; sock = sock->next) {
         if (sock->protocol != IPPROTO_UDP)
@@ -89,7 +91,7 @@ static void send_udp(struct rte_mempool *mpool)
 
         uint8_t *dst_mac = get_dst_macaddr(payload->dip);
         if (!dst_mac) {
-            send_arp(mpool, sock->mac, g_arp_request_mac, payload->sip, payload->dip, RTE_ARP_OP_REQUEST);
+            send_arp_pkt(mpool, sock->mac, g_arp_request_mac, payload->sip, payload->dip, RTE_ARP_OP_REQUEST);
             rte_ring_mp_enqueue(sock->sendbuf, payload);
         } else {
             const unsigned total_length =

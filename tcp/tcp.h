@@ -313,6 +313,8 @@ static int process_tcp_pkt(struct rte_mbuf *mbuf)
 	break;
     }
 
+    rte_pktmbuf_free(mbuf);
+
     return 0;
 }
 
@@ -357,7 +359,7 @@ create_tcp_pkt(uint8_t *pkt_data, uint16_t len,
     tcphdr->cksum = rte_ipv4_udptcp_cksum(iphdr, tcphdr);
 }
 
-static void send_tcp(struct rte_mempool *mpool)
+static void send_tcp_pkts(struct rte_mempool *mpool)
 {
     for (sock_t *sock = lsock; sock; sock = sock->next) {
 	if (sock->protocol != IPPROTO_TCP || !sock->sendbuf)
@@ -369,7 +371,7 @@ static void send_tcp(struct rte_mempool *mpool)
 
 	uint8_t *dst_mac = get_dst_macaddr(sock->sip);  // client ip
 	if (!dst_mac) {
-	    send_arp(mpool, sock->mac, g_arp_request_mac, sock->dip, sock->sip, RTE_ARP_OP_REQUEST);
+	    send_arp_pkt(mpool, sock->mac, g_arp_request_mac, sock->dip, sock->sip, RTE_ARP_OP_REQUEST);
 	    rte_ring_mp_enqueue(sock->sendbuf, fragment);
 	} else {
 	    const unsigned total_length =

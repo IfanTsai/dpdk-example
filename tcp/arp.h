@@ -30,6 +30,7 @@ typedef struct arp_entry {
 typedef struct arp_table {
     arp_entry_t *entries;
     int count;
+    pthread_spinlock_t spinlock;
 } arp_table_t;
 
 static arp_table_t *arp_table = NULL;
@@ -40,21 +41,51 @@ static inline arp_table_t *get_arp_table_instance(void)
         arp_table = (arp_table_t *)rte_zmalloc(NULL, sizeof(arp_table_t), 0);
         if (!arp_table)
             EEXIT("failed to malloc arp table");
+
+        pthread_spin_init(&arp_table->spinlock, PTHREAD_PROCESS_SHARED);
     }
 
     return arp_table;
 }
 
-static uint8_t* get_dst_macaddr(uint32_t ip)
+static uint8_t *get_dst_macaddr(uint32_t ip)
 {
     arp_table_t *arp_table = get_arp_table_instance();
 
-    for (arp_entry_t *iter = arp_table->entries; iter; iter = iter->next) {
+    int count = arp_table->count;
+    for (arp_entry_t *iter = arp_table->entries; count-- && iter; iter = iter->next) {
         if (ip == iter->ip)
             return iter->hwaddr;
     }
 
     return NULL;
+}
+
+static inline void add_arp_entry(uint32_t ip, uint8_t *mac)
+{
+    arp_table_t *arp_table = get_arp_table_instance();
+    uint8_t *hwaddr = get_dst_macaddr(ip);
+    if (!hwaddr) {
+        arp_entry_t *arp_entry = rte_zmalloc(NULL, sizeof(arp_entry_t), 0);
+        if (arp_entry) {
+            arp_entry->ip = ip;
+            rte_memcpy(arp_entry->hwaddr, mac, RTE_ETHER_ADDR_LEN);
+            arp_entry->type = ARP_ENTRY_TYPE_DYNAMIC;
+
+            pthread_spin_lock(&arp_table->spinlock);
+            LL_ADD(arp_entry, arp_table->entries);
+            arp_table->count++;
+            pthread_spin_unlock(&arp_table->spinlock);
+#if 0
+            // print arp talbe
+            printf("        arp entry count: %d\n", arp_table->count);
+            printf("%-15s %-20s %s\n", "ip", "mac", "type");
+            for (arp_entry_t *iter = arp_table->entries; iter; iter = iter->next)
+                print_arp_entry(iter);
+            printf("-------------------------------------------\n");
+#endif
+        }
+    }
 }
 
 static inline void print_arp_entry(arp_entry_t *entry)
@@ -69,7 +100,7 @@ static inline void print_arp_entry(arp_entry_t *entry)
     printf("%-15s %-20s %d\n", inet_ntoa(addr), buf, entry->type);
 }
 
-static void
+static inline void
 process_arp_request(struct rte_arp_hdr *arphdr, struct rte_ether_hdr *ethdr, uint8_t *this_mac_addr)
 {
     // set arp type is reply
@@ -88,33 +119,10 @@ process_arp_request(struct rte_arp_hdr *arphdr, struct rte_ether_hdr *ethdr, uin
     arphdr->arp_data.arp_sip = THIS_IPV4_ADDR;
 }
 
-static void process_arp_reply(struct rte_arp_hdr *arphdr)
+static inline void process_arp_reply(struct rte_arp_hdr *arphdr)
 {
-    arp_table_t *arp_table = get_arp_table_instance();
-    uint8_t *hwaddr = get_dst_macaddr(arphdr->arp_data.arp_sip);
-    if (!hwaddr) {
-        // add arp entry to arp table
-        arp_entry_t *arp_entry = rte_malloc(NULL, sizeof(arp_entry_t), 0);
-        if (arp_entry) {
-            memset(arp_entry, 0, sizeof(arp_entry_t));
-
-            arp_entry->ip = arphdr->arp_data.arp_sip;
-            rte_memcpy(arp_entry->hwaddr, arphdr->arp_data.arp_sha.addr_bytes, RTE_ETHER_ADDR_LEN);
-            arp_entry->type = ARP_ENTRY_TYPE_DYNAMIC;
-
-            LL_ADD(arp_entry, arp_table->entries);
-            arp_table->count++;
-
-#if 0
-            // print arp talbe
-            printf("        arp entry count: %d\n", arp_table->count);
-            printf("%-15s %-20s %s\n", "ip", "mac", "type");
-            for (arp_entry_t *iter = arp_table->entries; iter; iter = iter->next)
-                print_arp_entry(iter);
-            printf("-------------------------------------------\n");
-#endif
-        }
-    }
+    // add arp entry to arp table
+    add_arp_entry(arphdr->arp_data.arp_sip, arphdr->arp_data.arp_sha.addr_bytes);
 }
 
 static int process_arp_pkt(struct rte_mbuf *mbuf)
@@ -129,6 +137,7 @@ static int process_arp_pkt(struct rte_mbuf *mbuf)
     case RTE_ARP_OP_REQUEST: {
         process_arp_request(arphdr, ethdr, g_this_mac_addr);
         io_ring_t *io_ring = get_io_ring_instance();
+        // zero-copy process icmp request mbuf
         en_ring_burst(io_ring->out, &mbuf, 1);
         break;
     }
@@ -169,7 +178,7 @@ create_arp_packet(uint8_t *pkt_data,
 }
 
 static void
-send_arp(struct rte_mempool *mpool,
+send_arp_pkt(struct rte_mempool *mpool,
         uint8_t *src_mac, uint8_t *dst_mac, uint32_t src_ip, uint32_t dst_ip, uint16_t arp_opcode)
 {
     const unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_arp_hdr);
@@ -198,9 +207,9 @@ arp_request_timer_cb(__attribute__((unused)) struct rte_timer *tim, void *arg)
         uint32_t dst_ip = (THIS_IPV4_ADDR & 0x00ffffff) | ((i << 24) & 0xff000000);
         uint8_t *dst_mac = get_dst_macaddr(dst_ip);
         if (!dst_mac)
-            send_arp(mpool, g_this_mac_addr, g_arp_request_mac, THIS_IPV4_ADDR, dst_ip, RTE_ARP_OP_REQUEST);
+            send_arp_pkt(mpool, g_this_mac_addr, g_arp_request_mac, THIS_IPV4_ADDR, dst_ip, RTE_ARP_OP_REQUEST);
         else
-            send_arp(mpool, g_this_mac_addr, dst_mac, THIS_IPV4_ADDR, dst_ip, RTE_ARP_OP_REQUEST);
+            send_arp_pkt(mpool, g_this_mac_addr, dst_mac, THIS_IPV4_ADDR, dst_ip, RTE_ARP_OP_REQUEST);
     }
 }
 

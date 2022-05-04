@@ -1,6 +1,7 @@
 #ifndef __ICMP_H__
 #define __ICMP_H__
 
+#include "ring_buf.h"
 #include <rte_eal.h>
 #include <rte_ether.h>
 #include <rte_mbuf.h>
@@ -77,6 +78,10 @@ static int process_icmp_pkt(struct rte_mbuf *mbuf)
     // set icmp checksum
     icmphdr->icmp_cksum = 0;
     icmphdr->icmp_cksum = icmp_cksum(iphdr, icmphdr);
+
+    io_ring_t *io_ring = get_io_ring_instance();
+    // zero-copy process icmp request mbuf
+    en_ring_burst(io_ring->out, &mbuf, 1);
 
     return 0;
 }
