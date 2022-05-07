@@ -4,15 +4,15 @@
 # binary name
 APP = dpdk-tcp
 
+export BUILD_ROOT ?= $(shell pwd)
 # all source are stored in SRCS-y
-SRCS-y := main.c
+SRCS-y := $(notdir $(wildcard $(BUILD_ROOT)/*.c))
 
 # Build using pkg-config variables if possible
 ifeq ($(shell pkg-config --exists libdpdk && echo 0),0)
 
 all: shared
-
-.PHONY: shared static all2
+.PHONY: shared static
 shared: build/$(APP)-shared
 	ln -sf $(APP)-shared build/$(APP)
 static: build/$(APP)-static
@@ -23,8 +23,8 @@ PKGCONF=pkg-config --define-prefix
 PC_FILE := $(shell $(PKGCONF) --path libdpdk)
 CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
 CFLAGS += -DALLOW_EXPERIMENTAL_API
-LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
-LDFLAGS_STATIC = -Wl,-Bstatic $(shell $(PKGCONF) --static --libs libdpdk)
+LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk) -lm -pthread
+LDFLAGS_STATIC = -Wl,-Bstatic $(shell $(PKGCONF) --static --libs libdpdk) -lm -pthread
 
 build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)

@@ -270,7 +270,7 @@ create_udp_packet(uint8_t *pkt_data, uint16_t len,
     udphdr->src_port = sport;
     udphdr->dst_port = dport;
     uint16_t udp_len = len - sizeof(*ethdr) - sizeof(*iphdr);
-    rte_memcpy((uint8_t *)(udphdr + 1), data, udp_len);
+    rte_memcpy((uint8_t *)(udphdr + 1), data, udp_len - sizeof(*udphdr));
     udphdr->dgram_len = htons(udp_len);
     udphdr->dgram_cksum = 0;
     udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(iphdr, udphdr);
