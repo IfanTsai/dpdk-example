@@ -61,33 +61,6 @@ static uint8_t *get_dst_macaddr(uint32_t ip)
     return NULL;
 }
 
-static inline void add_arp_entry(uint32_t ip, uint8_t *mac)
-{
-    arp_table_t *arp_table = get_arp_table_instance();
-    uint8_t *hwaddr = get_dst_macaddr(ip);
-    if (!hwaddr) {
-        arp_entry_t *arp_entry = rte_zmalloc(NULL, sizeof(arp_entry_t), 0);
-        if (arp_entry) {
-            arp_entry->ip = ip;
-            rte_memcpy(arp_entry->hwaddr, mac, RTE_ETHER_ADDR_LEN);
-            arp_entry->type = ARP_ENTRY_TYPE_DYNAMIC;
-
-            pthread_spin_lock(&arp_table->spinlock);
-            LL_ADD(arp_entry, arp_table->entries);
-            arp_table->count++;
-            pthread_spin_unlock(&arp_table->spinlock);
-#if 0
-            // print arp talbe
-            printf("        arp entry count: %d\n", arp_table->count);
-            printf("%-15s %-20s %s\n", "ip", "mac", "type");
-            for (arp_entry_t *iter = arp_table->entries; iter; iter = iter->next)
-                print_arp_entry(iter);
-            printf("-------------------------------------------\n");
-#endif
-        }
-    }
-}
-
 static inline void print_arp_entry(arp_entry_t *entry)
 {
     struct in_addr addr = {
@@ -98,6 +71,36 @@ static inline void print_arp_entry(arp_entry_t *entry)
     rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE, (struct rte_ether_addr *)entry->hwaddr);
 
     printf("%-15s %-20s %d\n", inet_ntoa(addr), buf, entry->type);
+}
+
+static inline void add_arp_entry(uint32_t ip, uint8_t *mac)
+{
+    arp_table_t *arp_table = get_arp_table_instance();
+    uint8_t *hwaddr = get_dst_macaddr(ip);
+    if (!hwaddr) {
+        arp_entry_t *arp_entry = rte_zmalloc(NULL, sizeof(arp_entry_t), 0);
+        if (!arp_entry) {
+            RTE_LOG(WARNING, ARP, "failed to alloc mbuf to add arp entry");
+            return;
+        }
+
+        arp_entry->ip = ip;
+        rte_memcpy(arp_entry->hwaddr, mac, RTE_ETHER_ADDR_LEN);
+        arp_entry->type = ARP_ENTRY_TYPE_DYNAMIC;
+
+        pthread_spin_lock(&arp_table->spinlock);
+        LL_ADD(arp_entry, arp_table->entries);
+        arp_table->count++;
+        pthread_spin_unlock(&arp_table->spinlock);
+#if 0
+        // print arp talbe
+        printf("        arp entry count: %d\n", arp_table->count);
+        printf("%-15s %-20s %s\n", "ip", "mac", "type");
+        for (arp_entry_t *iter = arp_table->entries; iter; iter = iter->next)
+            print_arp_entry(iter);
+        printf("-------------------------------------------\n");
+#endif
+    }
 }
 
 static inline void

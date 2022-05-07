@@ -5,6 +5,7 @@
 #include "arp.h"
 #include "icmp.h"
 #include "app.h"
+#include "edd.h"
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
@@ -201,15 +202,18 @@ int main(int argc, char *argv[])
         }
 
         // receive
-        unsigned int nr_recvd = rte_eth_rx_burst(ETH_DEV_PORT_ID, 0, mbufs, BURST_SIZE);
+        uint16_t nr_recvd = rte_eth_rx_burst(ETH_DEV_PORT_ID, 0, mbufs, BURST_SIZE);
         if (nr_recvd > BURST_SIZE)
             EEXIT("too many packets, %d", nr_recvd);
 
-        if (nr_recvd > 0)
+        if (nr_recvd > 0) {
+            for (uint16_t i = 0; i < nr_recvd; i++)
+                detect_ddos(rte_pktmbuf_mtod(mbufs[i], uint8_t *), mbufs[i]->buf_len);
             en_ring_burst(io_ring->in, mbufs, nr_recvd);
+        }
 
         // send
-        unsigned int nr_send = de_ring_burst(io_ring->out, mbufs, BURST_SIZE);
+        uint16_t nr_send = de_ring_burst(io_ring->out, mbufs, BURST_SIZE);
         if (nr_send > 0) {
             rte_eth_tx_burst(ETH_DEV_PORT_ID, 0, mbufs, nr_send);
 
